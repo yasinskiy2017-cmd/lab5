@@ -1,4 +1,5 @@
-﻿name: CI/CD Pipeline
+name: CI/CD Pipeline
+
 on:
   push:
     branches: [ main ]
@@ -8,34 +9,48 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
-    - name: Install dependencies & run tests
-      run: |
-        npm install
-        npm test || echo "No tests configured"
+      - name: Install dependencies & run tests
+        run: |
+          npm install
+          npm test || echo "No tests configured"
 
-    - name: Decode SSH Key
-      run: |
-        echo "${{ secrets.EC2_SSH_KEY_B64 }}" | base64 -d > ec2-key.pem
-        chmod 600 ec2-key.pem
+      - name: Decode SSH Key
+        env:
+          KEY_B64: ${{ secrets.EC2_SSH_KEY_B64 }}
+        run: |
+          CLEAN_KEY=$(printf '%s' "$KEY_B64" | tr -d '[:space:]')
+          if printf '%s' "$CLEAN_KEY" | base64 -d > ec2-key.pem 2>/dev/null; then
+            echo "Decoded base64 SSH key"
+          else
+            printf '%s\n' "$KEY_B64" > ec2-key.pem
+            echo "Wrote raw SSH key"
+          fi
+          chmod 600 ec2-key.pem
 
-    - name: Copy project to EC2
-      run: |
-        rsync -avz -e "ssh -i ec2-key.pem -o StrictHostKeyChecking=no" ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USER }}/nodeapp
+      - name: Copy project to EC2
+        run: |
+          rsync -avz --exclude='.git' --exclude='node_modules' \
+            -e "ssh -i ec2-key.pem -o StrictHostKeyChecking=no" \
+            ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USER }}/nodeapp
 
-    - name: Run application on EC2
-      run: |
-        ssh -i ec2-key.pem -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          sudo npm install -g pm2
-          cd nodeapp && npm install
-          pm2 restart all || pm2 start index.js
-        EOF
+      - name: Run application on EC2
+        run: |
+          ssh -i ec2-key.pem -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            if ! command -v node >/dev/null 2>&1; then
+              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+            fi
+            if ! command -v pm2 >/dev/null 2>&1; then
+              sudo npm install -g pm2
+            fi
+            cd /home/$USER/nodeapp && npm install --omit=dev
+            pm2 restart all || pm2 start index.js
+          EOF
